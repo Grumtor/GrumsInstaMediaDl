@@ -1,0 +1,4 @@
+aiogram>=3.3
+instaloader>=4.11
+requests>=2.31
+python-dotenv>=1.0
