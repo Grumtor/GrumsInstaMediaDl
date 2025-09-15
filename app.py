@@ -24,7 +24,7 @@ from instaloader import Instaloader, Post
 
 st.set_page_config(page_title="IG Media Downloader (HQ, Batch)", page_icon="📸", layout="centered")
 
-st.title("📸 Instagram – Téléchargeur de médias (qualité max, multi-liens)")
+st.title("Donwload Instagram Media - By Grumtor")
 st.caption("Colle **un ou plusieurs liens** de publications Instagram **publiques** (un par ligne ou séparés par des espaces/virgules). L’app récupère **photos et vidéos**.")
 
 def extract_shortcode(url: str) -> str:
@@ -295,13 +295,3 @@ if submit:
                 mime="application/zip",
                 type="primary"
             )
-
-st.divider()
-with st.expander("ℹ️ Conseils et limites"):
-    st.markdown("""
-- Fonctionne **sans connexion** uniquement pour les **publications publiques**. 
-- Les **stories** ne sont pas supportées.
-- Qualité **maximale** pour photos et vidéos quand disponible.
-- Chaque post a son **sous-dossier** `{shortcode}_{legende-raccourcie}` pour éviter les collisions de noms.
-- Utilisez ce téléchargeur uniquement pour du contenu dont vous avez les **droits**.
-""")
