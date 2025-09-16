@@ -483,3 +483,34 @@ with st.expander("ℹ️ Conseils et limites"):
 - Utilisez ce téléchargeur uniquement pour du contenu dont vous avez les **droits**.
 - Pour débloquer plus de Reels/vidéos, ajoutez un **cookie `sessionid`** (compte dédié recommandé) dans la **barre latérale**.
 """)
+
+st.divider()
+with st.expander("ℹ️ Ou récuperer mon SessionId"):
+    st.markdown("""
+**Safari (macOS)**. 
+- Safari → Réglages… → Avancées → coche “Afficher le menu Développement”.
+- Connecte-toi sur instagram.com (pas m.instagram.com).
+- Développement → Afficher l’inspecteur Web (⌥⌘I).
+- Onglet Stockage → Cookies → https://www.instagram.com.
+- Trouve la ligne sessionid → copie la colonne Value (toute la valeur, sans espace).
+
+Chrome / Brave / Edge (Chromium)
+- Connecte-toi sur instagram.com.
+- Ouvre DevTools (⌥⌘I) → onglet Application.
+- Menu Storage → Cookies → https://www.instagram.com.
+- Clique sur sessionid → copie Value.
+                
+Firefox
+- Connecte-toi sur instagram.com.
+- Outils → Outils du navigateur → Outils de développement (⌥⌘I).
+- Onglet Stockage → Cookies → https://www.instagram.com.
+- Sélectionne sessionid → copie Value.
+                
+Astuces / soucis fréquents
+- Si tu ne vois pas sessionid, rafraîchis la page après connexion, ou ouvre un post.
+- En navigation privée, certains cookies peuvent disparaître à la fermeture.
+- Changer le mot de passe / se déconnecter invalide le cookie.
+- La valeur ressemble souvent à une chaîne longue (parfois encodée avec %). Copie-la entière.
+- Tu peux aussi coller la ligne complète de cookies depuis DevTools : mon app extraira automatiquement sessionid.
+- Ensuite, colle la valeur dans la barre latérale → “🔐 Connexion Instagram” de l’app et clique “Enregistrer”. Si tout est ok, tu verras ✅ Authentifié (cookie actif).
+""")
