@@ -526,7 +526,7 @@ with st.expander("ℹ️ Conseils et limites"):
 """)
 
 st.divider()
-with st.expander("ℹ️ Où récupérer mon SessionId"):
+with st.expander("ℹ️ Où récupérer mon SessionId (Mac)"):
     st.markdown("""
 **Safari (macOS)**  
 - Safari → Réglages… → Avancées → coche “Afficher le menu Développement”.  
@@ -554,4 +554,28 @@ with st.expander("ℹ️ Où récupérer mon SessionId"):
 - Tu peux aussi coller la **ligne complète de cookies** : l’app extrait automatiquement `sessionid`.  
 - Ensuite, colle la valeur dans la **barre latérale → “🔐 Connexion Instagram”** et clique **“Enregistrer”**.  
 Si tout est ok, tu verras **✅ Authentifié (cookie actif)**.
+""")
+
+st.divider()
+with st.expander("ℹ️ Où récupérer mon SessionId (Windows)"):
+    st.markdown("""
+**Chrome / Brave / Edge (Chromium)**  
+- Connecte-toi sur **instagram.com** (pas **m.instagram.com**).  
+- Ouvre DevTools (**Ctrl+Shift+I** ou **F12**) → onglet **Application**.  
+- Menu **Storage** → **Cookies** → **https://www.instagram.com**.  
+- Clique sur **sessionid** → copie **Value** (toute la valeur, sans espace).
+
+**Firefox (Windows)**  
+- Connecte-toi sur **instagram.com**.  
+- Ouvre les Outils de développement (**Ctrl+Shift+I** ou **F12**).  
+- Onglet **Stockage** → **Cookies** → **https://www.instagram.com**.  
+- Sélectionne **sessionid** → copie **Value**.
+
+**Astuces / soucis fréquents**  
+- Si tu ne vois pas **sessionid**, rafraîchis la page après connexion (**Ctrl+R**) ou ouvre un post.  
+- En navigation privée, certains cookies peuvent disparaître à la fermeture.  
+- Changer le mot de passe / se déconnecter invalide le cookie.  
+- La valeur ressemble à une longue chaîne (parfois encodée avec **%**). **Copie-la entière**.  
+- Tu peux aussi coller la **ligne complète de cookies** depuis DevTools : mon app extraira automatiquement **sessionid**.  
+- Ensuite, colle la valeur dans la barre latérale → **“🔐 Connexion Instagram”** de l’app et clique **“Enregistrer”**. Si tout est OK, tu verras **✅ Authentifié (cookie actif)**.
 """)
