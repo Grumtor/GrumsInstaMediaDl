@@ -19,10 +19,11 @@ import zipfile
 import unicodedata
 from typing import List, Optional, Dict
 
-import os, html
+import os, html, random
 import requests
 import streamlit as st
 from instaloader import Instaloader, Post
+from instaloader.exceptions import ConnectionException, BadResponseException
 from urllib.parse import urlparse
 
 import hashlib
@@ -243,10 +244,36 @@ def _post_best_single_video_url(post: Post) -> Optional[str]:
     return None
 
 # =========================
+# Backoff / retries anti-429
+# =========================
+def _post_from_shortcode_with_backoff(L: Instaloader, shortcode: str, max_attempts: int = 5) -> Post:
+    """
+    Essaie de récupérer le Post avec exponentiel backoff si IG renvoie
+    'Please wait a few minutes', Unauthorized, 429, etc.
+    """
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return Post.from_shortcode(L.context, shortcode)
+        except (ConnectionException, BadResponseException, Exception) as e:
+            last_exc = e
+            msg = str(e)
+            transient = any(s in msg for s in [
+                "Please wait a few minutes", "Too many requests", "429",
+                "Unauthorized", "checkpoint", "try again later"
+            ])
+            if transient and attempt < max_attempts - 1:
+                sleep_s = min(60.0, (1.6 ** attempt) + random.uniform(0.2, 0.8))
+                time.sleep(sleep_s)
+                continue
+            break
+    raise last_exc if last_exc else RuntimeError("Échec de récupération du post.")
+
+# =========================
 # Fetch bundle (avec auth)
 # =========================
 @st.cache_data(show_spinner=False)
-def fetch_post_bundle(shortcode: str, use_auth: bool, scope: str) -> dict:
+def fetch_post_bundle(shortcode: str, use_auth: bool, scope: str, max_attempts: int) -> dict:
     """
     Retourne un dict:
     {
@@ -258,7 +285,7 @@ def fetch_post_bundle(shortcode: str, use_auth: bool, scope: str) -> dict:
     """
     # 'scope' n'est pas utilisé dans le corps : il sert à isoler le cache par utilisateur
     L = _get_instaloader_with_auth(use_auth)
-    post = Post.from_shortcode(L.context, shortcode)
+    post = _post_from_shortcode_with_backoff(L, shortcode, max_attempts=max_attempts)
     caption = post.caption or ""
     username = getattr(post, "owner_username", "") or ""
     media: List[Dict[str, str]] = []
@@ -367,7 +394,7 @@ def parse_urls(text: str) -> List[str]:
     return dedup
 
 # =========================
-# Sidebar: Connexion
+# Sidebar: Connexion + Mode Safe
 # =========================
 with st.sidebar:
     st.header("🔐 Connexion Instagram (optionnel)")
@@ -410,6 +437,10 @@ with st.sidebar:
     else:
         st.info("🚫 Non authentifié (mode invité). Certains Reels/vidéos peuvent échouer.")
 
+    st.subheader("⚙️ Mode Safe (anti rate-limit)")
+    SAFE_DELAY_S = st.number_input("Délai min entre posts (secondes)", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
+    MAX_ATTEMPTS = st.number_input("Tentatives max / post", min_value=1, max_value=10, value=5, step=1)
+
 # =========================
 # Formulaire principal
 # =========================
@@ -429,18 +460,28 @@ if submit:
         scope = _cache_scope()  # <— isole le cache par utilisateur
         for i, u in enumerate(urls, 1):
             try:
+                # Throttle global pour éviter les 401/429
+                if i > 1 and SAFE_DELAY_S > 0:
+                    time.sleep(SAFE_DELAY_S + random.uniform(0, SAFE_DELAY_S * 0.25))
+
                 shortcode = extract_shortcode(u)
                 use_auth = bool(_get_current_sessionid())
-                bundle = fetch_post_bundle(shortcode, use_auth=use_auth, scope=scope)
+                bundle = fetch_post_bundle(shortcode, use_auth=use_auth, scope=scope, max_attempts=int(MAX_ATTEMPTS))
                 if not bundle["media"]:
                     errors.append((u, "Aucun média trouvé (post privé ou non accessible)."))
                 else:
                     bundles.append(bundle)
                     st.write(f"✅ {u} → {len(bundle['media'])} média(s).")
             except Exception as e:
-                errors.append((u, str(e)))
+                msg = str(e)
+                if ("Please wait a few minutes" in msg) or ("Unauthorized" in msg) or ("429" in msg):
+                    msg = ("Limite Instagram atteinte (rate-limit). "
+                           "Active le Mode Safe, augmente le délai entre posts, "
+                           "et vérifie ton cookie `sessionid`.")
+                errors.append((u, msg))
             prog.progress(i / len(urls))
-            time.sleep(0.1)
+            # petit yield UI
+            time.sleep(0.05)
 
         if errors:
             with st.expander("⚠️ Liens en erreur"):
@@ -485,32 +526,32 @@ with st.expander("ℹ️ Conseils et limites"):
 """)
 
 st.divider()
-with st.expander("ℹ️ Ou récuperer mon SessionId"):
+with st.expander("ℹ️ Où récupérer mon SessionId"):
     st.markdown("""
-**Safari (macOS)**. 
-- Safari → Réglages… → Avancées → coche “Afficher le menu Développement”.
-- Connecte-toi sur instagram.com (pas m.instagram.com).
-- Développement → Afficher l’inspecteur Web (⌥⌘I).
-- Onglet Stockage → Cookies → https://www.instagram.com.
-- Trouve la ligne sessionid → copie la colonne Value (toute la valeur, sans espace).
+**Safari (macOS)**  
+- Safari → Réglages… → Avancées → coche “Afficher le menu Développement”.  
+- Connecte-toi sur instagram.com (pas m.instagram.com).  
+- Développement → Afficher l’inspecteur Web (⌥⌘I).  
+- Onglet Stockage → Cookies → https://www.instagram.com.  
+- Trouve la ligne `sessionid` → copie la colonne **Value**.
 
-Chrome / Brave / Edge (Chromium)
-- Connecte-toi sur instagram.com.
-- Ouvre DevTools (⌥⌘I) → onglet Application.
-- Menu Storage → Cookies → https://www.instagram.com.
-- Clique sur sessionid → copie Value.
-                
-Firefox
-- Connecte-toi sur instagram.com.
-- Outils → Outils du navigateur → Outils de développement (⌥⌘I).
-- Onglet Stockage → Cookies → https://www.instagram.com.
-- Sélectionne sessionid → copie Value.
-                
-Astuces / soucis fréquents
-- Si tu ne vois pas sessionid, rafraîchis la page après connexion, ou ouvre un post.
-- En navigation privée, certains cookies peuvent disparaître à la fermeture.
-- Changer le mot de passe / se déconnecter invalide le cookie.
-- La valeur ressemble souvent à une chaîne longue (parfois encodée avec %). Copie-la entière.
-- Tu peux aussi coller la ligne complète de cookies depuis DevTools : mon app extraira automatiquement sessionid.
-- Ensuite, colle la valeur dans la barre latérale → “🔐 Connexion Instagram” de l’app et clique “Enregistrer”. Si tout est ok, tu verras ✅ Authentifié (cookie actif).
+**Chrome / Brave / Edge (Chromium)**  
+- Connecte-toi sur instagram.com.  
+- Ouvre DevTools (⌥⌘I) → onglet **Application**.  
+- Storage → Cookies → https://www.instagram.com.  
+- Clique sur `sessionid` → copie **Value**.
+
+**Firefox**  
+- Connecte-toi sur instagram.com.  
+- Outils → Outils du navigateur → Outils de développement (⌥⌘I).  
+- Onglet Stockage → Cookies → https://www.instagram.com.  
+- Sélectionne `sessionid` → copie **Value**.
+
+**Astuces**  
+- Si tu ne vois pas `sessionid`, rafraîchis après connexion, ou ouvre un post.  
+- En navigation privée, le cookie peut disparaître à la fermeture.  
+- Changer le mot de passe / se déconnecter invalide le cookie.  
+- Tu peux aussi coller la **ligne complète de cookies** : l’app extrait automatiquement `sessionid`.  
+- Ensuite, colle la valeur dans la **barre latérale → “🔐 Connexion Instagram”** et clique **“Enregistrer”**.  
+Si tout est ok, tu verras **✅ Authentifié (cookie actif)**.
 """)
