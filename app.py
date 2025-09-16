@@ -10,31 +10,158 @@
 # Remarques:
 # - Pas de connexion: ne fonctionne pas avec les posts privés / restreints.
 # - Les stories ne sont pas prises en charge.
+# Start the app : python -m streamlit run app.py
 
 import io
 import re
 import time
 import zipfile
 import unicodedata
-from typing import List, Tuple, Optional, Dict
+from typing import List, Optional, Dict
 
+import os, html
 import requests
 import streamlit as st
 from instaloader import Instaloader, Post
+from urllib.parse import urlparse
+
+import hashlib
+
 
 st.set_page_config(page_title="IG Media Downloader (HQ, Batch)", page_icon="📸", layout="centered")
 
-st.title("Donwload Instagram Media - By Grumtor")
+st.title("Download Instagram Media - By Grumtor")
 st.caption("Colle **un ou plusieurs liens** de publications Instagram **publiques** (un par ligne ou séparés par des espaces/virgules). L’app récupère **photos et vidéos**.")
 
+# =========================
+# Helpers AUTH (sessionid)
+# =========================
+def _extract_sessionid_from_cookie_string(cookie_str: str) -> Optional[str]:
+    """Permet de coller un 'cookie string' complet (copié du navigateur) et d'en extraire la valeur de sessionid."""
+    if not cookie_str:
+        return None
+    m = re.search(r"(?:^|;\s*)sessionid=([^;]+)", cookie_str)
+    return m.group(1).strip() if m else None
+
+def _get_current_sessionid() -> Optional[str]:
+    """Ordre de priorité :
+    1) valeur saisie par l'utilisateur (session_state)
+    2) st.secrets (si dispo)
+    3) variable d'environnement IG_SESSIONID
+    Cette version ne plante pas si aucun secrets.toml n'est présent.
+    """
+    # 1) Saisie UI (mémoire de session)
+    try:
+        sid_user = st.session_state.get("IG_SESSIONID_USER")
+        if sid_user:
+            return sid_user
+    except Exception:
+        pass
+
+    # 2) Secrets Streamlit (peut ne pas exister)
+    try:
+        secrets_obj = st.secrets  # l'accès lui-même peut lever si aucun secrets.toml
+        InstaDict = secrets_obj.get("instagram", {})
+        if isinstance(InstaDict, dict):
+            sid = InstaDict.get("sessionid")
+            if sid:
+                return sid
+        sid = secrets_obj.get("IG_SESSIONID")
+        if sid:
+            return sid
+    except Exception:
+        pass
+
+    # 3) Variable d'environnement
+    return os.getenv("IG_SESSIONID", None)
+
+def _build_browsery_session() -> requests.Session:
+    """Session HTTP avec UA navigateur + cookie sessionid si dispo."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"),
+        "Accept": "*/*",
+        "Accept-Language": "fr,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+    })
+    sid = _get_current_sessionid()
+    if sid:
+        s.cookies.set("sessionid", sid, domain=".instagram.com")
+    return s
+
+def _get_instaloader_with_auth(use_auth: bool) -> Instaloader:
+    """Instaloader avec les mêmes headers/cookies (si use_auth=True)."""
+    L = Instaloader(
+        download_comments=False,
+        save_metadata=False,
+        post_metadata_txt_pattern="",
+        quiet=True,
+        max_connection_attempts=3,
+    )
+    if use_auth:
+        s = L.context._session
+        s.headers.update({
+            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"),
+            "Accept": "*/*",
+            "Accept-Language": "fr,en;q=0.9",
+            "Referer": "https://www.instagram.com/",
+        })
+        sid = _get_current_sessionid()
+        if sid:
+            s.cookies.set("sessionid", sid, domain=".instagram.com")
+    return L
+
+def _scrape_og_from_reel(shortcode: str) -> Optional[Dict[str, str]]:
+    """Fallback minimal: lit og:video / og:image de la page du Reel si Instaloader ne renvoie rien."""
+    try:
+        sess = _build_browsery_session()
+        url = f"https://www.instagram.com/reel/{shortcode}/"
+        r = sess.get(url, timeout=20)
+        r.raise_for_status()
+        html_text = r.text
+        # (fix regex: \s au lieu de \\s)
+        m = re.search(r'property="og:video"\s+content="([^"]+)"', html_text)
+        if m:
+            return {"kind": "video", "url": html.unescape(m.group(1))}
+        m = re.search(r'property="og:image"\s+content="([^"]+)"', html_text)
+        if m:
+            return {"kind": "photo", "url": html.unescape(m.group(1))}
+    except Exception:
+        pass
+    return None
+
+# =========================
+# Cache scope par session
+# =========================
+def _cache_scope() -> str:
+    sid = _get_current_sessionid()
+    return hashlib.sha256(sid.encode()).hexdigest()[:10] if sid else "anon"
+
+# =========================
+# URL / filename helpers
+# =========================
 def extract_shortcode(url: str) -> str:
     if not url:
         raise ValueError("URL vide.")
-    url = url.split("?")[0].split("#")[0]
-    m = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_\-]+)/?", url)
-    if not m:
-        raise ValueError("URL invalide. Exemple: https://www.instagram.com/p/XXXXXXXXX/")
-    return m.group(1)
+    clean = url.split("?")[0].split("#")[0]
+    u = urlparse(clean)
+    parts = [p for p in u.path.split("/") if p]
+
+    for tag in ("p", "reel", "tv"):
+        if tag in parts:
+            i = parts.index(tag)
+            if i + 1 < len(parts):
+                code = parts[i + 1]
+                if re.fullmatch(r"[A-Za-z0-9_\-]+", code):
+                    return code
+
+    m = re.search(r"(?:^|/)(?:p|reel|tv)/([A-Za-z0-9_\-]+)(?:/|$)", u.path)
+    if m:
+        return m.group(1)
+
+    raise ValueError("URL invalide. Exemple: https://www.instagram.com/p/XXXXXXXXX/ ou https://www.instagram.com/<user>/p/XXXXXXXXX/")
 
 def sanitize_filename(text: str, max_len: int = 90) -> str:
     if not text:
@@ -115,8 +242,11 @@ def _post_best_single_video_url(post: Post) -> Optional[str]:
             return best
     return None
 
+# =========================
+# Fetch bundle (avec auth)
+# =========================
 @st.cache_data(show_spinner=False)
-def fetch_post_bundle(shortcode: str) -> Dict[str, object]:
+def fetch_post_bundle(shortcode: str, use_auth: bool, scope: str) -> dict:
     """
     Retourne un dict:
     {
@@ -126,7 +256,8 @@ def fetch_post_bundle(shortcode: str) -> Dict[str, object]:
         "media": List[{"kind": "photo"|"video", "url": str}]
     }
     """
-    L = Instaloader(download_comments=False, save_metadata=False, post_metadata_txt_pattern="")
+    # 'scope' n'est pas utilisé dans le corps : il sert à isoler le cache par utilisateur
+    L = _get_instaloader_with_auth(use_auth)
     post = Post.from_shortcode(L.context, shortcode)
     caption = post.caption or ""
     username = getattr(post, "owner_username", "") or ""
@@ -159,8 +290,17 @@ def fetch_post_bundle(shortcode: str) -> Dict[str, object]:
             if p:
                 media.append({"kind": "photo", "url": p})
 
+    # Fallback OG si toujours rien (utile pour certains Reels)
+    if not media:
+        og = _scrape_og_from_reel(shortcode)
+        if og:
+            media.append(og)
+
     return {"shortcode": shortcode, "username": username, "caption": caption, "media": media}
 
+# =========================
+# Download zip
+# =========================
 def _ext_from_content_type(ct: str, fallback: str) -> str:
     ct = (ct or "").lower()
     if "png" in ct:
@@ -182,18 +322,13 @@ def _ext_from_content_type(ct: str, fallback: str) -> str:
 def download_all_as_zip(bundles: List[Dict[str, object]]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-            "Accept": "*/*",
-            "Accept-Language": "fr,en;q=0.9"
-        })
+        session = _build_browsery_session()
         for bidx, b in enumerate(bundles, start=1):
             caption = b["caption"] or ""
             shortcode = b["shortcode"]
             folder_caption = sanitize_filename(caption, 40)
             folder = f"{shortcode}_{folder_caption or 'post'}"
-            base = sanitize_filename(caption)  # pour les noms de fichiers
+            base = sanitize_filename(caption)
             media = b["media"]
             for midx, item in enumerate(media, start=1):
                 url = item["url"]
@@ -212,10 +347,7 @@ def download_all_as_zip(bundles: List[Dict[str, object]]) -> bytes:
                         err = e
                         time.sleep(0.7 * (attempt + 1))
                 if content is not None:
-                    if kind == "video":
-                        ext = _ext_from_content_type(ctype, ".mp4")
-                    else:
-                        ext = _ext_from_content_type(ctype, ".jpg")
+                    ext = _ext_from_content_type(ctype, ".mp4" if kind == "video" else ".jpg")
                     filename = f"{folder}/{base}_{midx:02d}{ext}"
                     zf.writestr(filename, content)
                 else:
@@ -224,10 +356,8 @@ def download_all_as_zip(bundles: List[Dict[str, object]]) -> bytes:
     return buf.read()
 
 def parse_urls(text: str) -> List[str]:
-    # Sépare par nouvelles lignes, espaces, virgules, points-virgules
     raw = re.split(r"[,\s;]+", text.strip())
     urls = [u for u in raw if u]
-    # Remove duplicates en conservant l'ordre
     seen = set()
     dedup = []
     for u in urls:
@@ -236,6 +366,53 @@ def parse_urls(text: str) -> List[str]:
             seen.add(u)
     return dedup
 
+# =========================
+# Sidebar: Connexion
+# =========================
+with st.sidebar:
+    st.header("🔐 Connexion Instagram (optionnel)")
+    st.caption("Colle ton cookie **sessionid** (compte dédié recommandé). "
+               "Pour persistance, utilise plutôt `.streamlit/secrets.toml` ou les *Secrets* de Streamlit Cloud.")
+
+    mode = st.radio(
+        "Méthode d'entrée",
+        options=["Entrer uniquement la valeur sessionid", "Coller le cookie complet (ligne entière)"],
+        index=0,
+        horizontal=False
+    )
+
+    if mode == "Entrer uniquement la valeur sessionid":
+        sid_input = st.text_input("sessionid", type="password", placeholder="ex: 123456789%3Aabcdefghijklmnop%3A1%3A...")
+        if st.button("Enregistrer le cookie dans cette session"):
+            if sid_input.strip():
+                st.session_state["IG_SESSIONID_USER"] = sid_input.strip()
+                st.success("Cookie enregistré en mémoire (tactique).")
+            else:
+                st.warning("Aucune valeur saisie.")
+    else:
+        cookie_str = st.text_area("Colle ici la ligne de cookies complète copiée du navigateur", height=80, placeholder="csrftoken=...; sessionid=...; mid=...;")
+        if st.button("Extraire & enregistrer"):
+            sid = _extract_sessionid_from_cookie_string(cookie_str or "")
+            if sid:
+                st.session_state["IG_SESSIONID_USER"] = sid
+                st.success("Cookie `sessionid` extrait et enregistré en mémoire.")
+            else:
+                st.error("Impossible de trouver `sessionid` dans la chaîne de cookies.")
+
+    # Bouton de suppression du cookie (BYO-cookie propre)
+    if st.button("🔓 Supprimer le cookie de cette session"):
+        st.session_state.pop("IG_SESSIONID_USER", None)
+        st.success("Cookie retiré de la mémoire de session.")
+
+    current_sid = _get_current_sessionid()
+    if current_sid:
+        st.success("✅ Authentifié (cookie actif).")
+    else:
+        st.info("🚫 Non authentifié (mode invité). Certains Reels/vidéos peuvent échouer.")
+
+# =========================
+# Formulaire principal
+# =========================
 with st.form("batch_form"):
     url_text = st.text_area("Colle tes liens de publications Instagram (un par ligne, ou séparés par espaces/virgules)", height=160, placeholder="https://www.instagram.com/p/AAA/\nhttps://www.instagram.com/reel/BBB/\nhttps://www.instagram.com/p/CCC/")
     submit = st.form_submit_button("Télécharger en lot (photos + vidéos)")
@@ -249,10 +426,12 @@ if submit:
         bundles = []
         errors = []
         prog = st.progress(0)
+        scope = _cache_scope()  # <— isole le cache par utilisateur
         for i, u in enumerate(urls, 1):
             try:
                 shortcode = extract_shortcode(u)
-                bundle = fetch_post_bundle(shortcode)
+                use_auth = bool(_get_current_sessionid())
+                bundle = fetch_post_bundle(shortcode, use_auth=use_auth, scope=scope)
                 if not bundle["media"]:
                     errors.append((u, "Aucun média trouvé (post privé ou non accessible)."))
                 else:
@@ -272,7 +451,6 @@ if submit:
             st.error("Aucun média téléchargeable trouvé.")
         else:
             st.success(f"Prêt: {len(bundles)} post(s) valides, {sum(len(b['media']) for b in bundles)} média(s) au total.")
-            # Optionnel: petit aperçu du premier média de chaque post
             with st.expander("Aperçu rapide (premier média de chaque post)"):
                 for b in bundles:
                     if b["media"]:
@@ -286,7 +464,6 @@ if submit:
                                 st.write(f"{b['shortcode']} – vidéo 1: {first['url']}")
 
             zip_bytes = download_all_as_zip(bundles)
-            # Nom du zip basé sur le premier shortcode + compteur
             zip_name = "instagram_medias_batch.zip"
             st.download_button(
                 "📦 Télécharger le ZIP (qualité max)",
@@ -295,3 +472,14 @@ if submit:
                 mime="application/zip",
                 type="primary"
             )
+
+st.divider()
+with st.expander("ℹ️ Conseils et limites"):
+    st.markdown("""
+- Fonctionne **sans connexion** uniquement pour les **publications publiques**. 
+- Les **stories** ne sont pas supportées.
+- Qualité **maximale** pour photos et vidéos quand disponible.
+- Chaque post a son **sous-dossier** `{shortcode}_{legende-raccourcie}` pour éviter les collisions de noms.
+- Utilisez ce téléchargeur uniquement pour du contenu dont vous avez les **droits**.
+- Pour débloquer plus de Reels/vidéos, ajoutez un **cookie `sessionid`** (compte dédié recommandé) dans la **barre latérale**.
+""")
